@@ -11,6 +11,10 @@ pub enum RecordType {
     Delete = 1,
 }
 
+// Record
+// -Header
+// -Payload
+
 // struct Record {
 //     record_type: RecordType,
 //     key: Vec<u8>,
@@ -92,6 +96,10 @@ impl KvStore {
 
         file.read_exact(&mut record).unwrap();
 
+        if record[0] != RecordType::Put as u8 {
+            return None;
+        }
+
         let key_size = u32::from_le_bytes(record[1..5].try_into().unwrap()) as usize;
         let value_size = u32::from_le_bytes(record[5..9].try_into().unwrap()) as usize;
 
@@ -102,6 +110,37 @@ impl KvStore {
         let value = &record[value_start..value_end];
 
         Some(value.to_vec())
+    }
+
+    fn delete(&mut self, key: &[u8]) {
+        // delete should append a new record(delete)
+        if self.memory_store.contains_key(key) {
+            let key_len = key.len() as u32;
+
+            let file_id = "active";
+
+            let mut file = File::options()
+                .create(true)
+                .append(true)
+                .open(format!("{}/{}", &self.dir_path, file_id)) // auto generate file_id
+                .unwrap();
+
+            let key_len_bytes = key_len.to_le_bytes();
+
+            // buffer contents: record_type 1byte | key_size 4bytes | key n-bytes
+            let bufs = [
+                IoSlice::new(&[RecordType::Delete as u8]),
+                IoSlice::new(&key_len_bytes),
+                IoSlice::new(&[0u8]),
+                IoSlice::new(key),
+            ];
+
+            let _ = file.write_vectored(&bufs).unwrap();
+
+            file.sync_all().unwrap();
+
+            self.memory_store.remove(key);
+        }
     }
 }
 
@@ -116,6 +155,12 @@ fn main() {
     let value = db.get(b"age");
 
     println!("age: {:?}", value);
+
+    let value = db.get(b"name");
+
+    println!("name: {:?}", value);
+
+    db.delete(b"name");
 
     let value = db.get(b"name");
 
