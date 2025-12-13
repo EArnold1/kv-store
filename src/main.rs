@@ -1,10 +1,8 @@
 use std::{
     collections::HashMap,
-    fs::File,
-    io::{Read, Seek, SeekFrom, Write},
+    fs::{self, File},
+    io::{IoSlice, Read, Seek, SeekFrom, Write},
     path::Path,
-    thread,
-    time::Duration,
 };
 
 #[derive(Debug)]
@@ -13,95 +11,113 @@ pub enum RecordType {
     Delete = 1,
 }
 
-struct Record {
-    record_type: RecordType,
-    key: Vec<u8>,
-    value: Vec<u8>,
-}
+// struct Record {
+//     record_type: RecordType,
+//     key: Vec<u8>,
+//     value: Vec<u8>,
+// }
 
 // kv store
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct KvStore {
     // current_offset: u64
-    memory_store: HashMap<String, (String, u64, usize)>, //file_id, position, size
+    memory_store: HashMap<Vec<u8>, (String, u64, usize)>, //file_id, offset, size
+    dir_path: String,
 }
 
+// impl Default for KvStore {
+//     fn default() -> Self {
+//         Self {
+//             memory_store: HashMap::new(),
+//             dir_path: String::from("tmp"),
+//         }
+//     }
+// }
+
 impl KvStore {
-    fn put(&mut self, key: String, value: String) {
-        // record_type - 1byte | key_size 4bytes | value_size 4bytes | key n-bytes | value n-bytes
-        let mut buf = Vec::with_capacity(1 + 4 + 4 + key.len() + value.len());
+    fn new(dir_path: &str) -> Self {
+        if !Path::new(dir_path).exists() {
+            fs::create_dir(dir_path).unwrap();
+        }
 
-        // TODO: implement zero-copy
-        buf.push(RecordType::Put as u8); // using push because it is a single byte
+        Self {
+            memory_store: HashMap::new(),
+            dir_path: dir_path.to_owned(),
+        }
+    }
 
-        // convert key & value length to 4 bytes
-        buf.extend(&(key.len() as u32).to_le_bytes());
-        buf.extend(&(value.len() as u32).to_le_bytes());
-        buf.extend(key.as_bytes());
-        buf.extend(value.as_bytes());
+    fn put(&mut self, key: &[u8], value: &[u8]) {
+        let key_len = key.len() as u32;
+        let value_len = value.len() as u32;
 
-        let path = Path::new("tmp/active");
+        let file_id = "active";
 
         let mut file = File::options()
             .create(true)
             .append(true)
-            .open(path)
+            .open(format!("{}/{}", &self.dir_path, file_id)) // auto generate file_id
             .unwrap();
 
         let offset = file.metadata().unwrap().len();
 
-        file.write_all(&buf).unwrap();
+        let key_len_bytes = key_len.to_le_bytes();
+        let value_len_bytes = value_len.to_le_bytes();
+
+        // buffer contents: record_type 1byte | key_size 4bytes | value_size 4bytes | key n-bytes | value n-bytes
+        let bufs = [
+            IoSlice::new(&[RecordType::Put as u8]),
+            IoSlice::new(&key_len_bytes),
+            IoSlice::new(&value_len_bytes),
+            IoSlice::new(key),
+            IoSlice::new(value),
+        ];
+
+        let size = file.write_vectored(&bufs).unwrap();
 
         file.sync_all().unwrap();
 
-        let size = buf.len();
-
         self.memory_store
-            .insert(key.clone(), ("tmp/active".to_owned(), offset, size));
+            .insert(key.to_vec(), (file_id.to_owned(), offset, size));
     }
 
-    fn get(&self, key: String) -> Option<String> {
-        match self.memory_store.get(&key) {
-            Some((p, offset, size)) => {
-                let mut file = File::open(p).unwrap();
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let (file_id, offset, size) = self.memory_store.get(key)?;
 
-                file.seek(SeekFrom::Start(*offset)).unwrap();
+        let mut file = File::open(format!("{}/{}", &self.dir_path, file_id)).unwrap();
 
-                let mut record = vec![0u8; *size];
+        file.seek(SeekFrom::Start(*offset)).unwrap();
 
-                file.read_exact(&mut record).unwrap();
+        // Implement zero-cost
+        let mut record = vec![0u8; *size];
 
-                let key_size = u32::from_le_bytes(record[1..5].try_into().unwrap()) as usize;
-                let value_size = u32::from_le_bytes(record[5..9].try_into().unwrap()) as usize;
+        file.read_exact(&mut record).unwrap();
 
-                let key_start = 9;
-                let value_start = key_start + key_size;
-                let value_end = value_start + value_size;
+        let key_size = u32::from_le_bytes(record[1..5].try_into().unwrap()) as usize;
+        let value_size = u32::from_le_bytes(record[5..9].try_into().unwrap()) as usize;
 
-                // let key = &record[key_start..value_start];
-                let value = &record[value_start..value_end];
+        let key_start = 9;
+        let value_start = key_start + key_size;
+        let value_end = value_start + value_size;
 
-                Some(String::from_utf8_lossy(value).to_string())
-            }
-            None => None,
-        }
+        let value = &record[value_start..value_end];
+
+        Some(value.to_vec())
     }
 }
 
 fn main() {
-    let mut db = KvStore::default();
+    let mut db = KvStore::new("tmp");
 
-    db.put(String::from("name"), String::from("Arnold"));
+    db.put(b"name", b"Arnold");
 
-    db.put(String::from("name"), String::from("Emmanuel"));
-    db.put(String::from("age"), String::from("21"));
-    thread::sleep(Duration::from_secs(1));
+    db.put(b"name", b"Emmanuel");
+    db.put(b"age", b"21");
 
-    let value = db.get(String::from("age"));
+    let value = db.get(b"age");
 
     println!("age: {:?}", value);
 
-    let value = db.get(String::from("name"));
+    let value = db.get(b"name");
 
     println!("name: {:?}", value);
 }
