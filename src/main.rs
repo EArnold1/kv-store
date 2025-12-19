@@ -1,4 +1,5 @@
 mod error;
+mod helper;
 mod record;
 mod store;
 

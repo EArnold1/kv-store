@@ -3,17 +3,20 @@ use std::{
     fs::File,
     io::{IoSlice, Read, Seek, SeekFrom, Write},
     path::PathBuf,
+    time::SystemTime,
 };
 
 use crate::{
     error::KvError,
+    helper::system_time_to_bytes,
     record::{Record, RecordType},
 };
 
 fn append(record: Record, file_path: &str) -> Result<(usize, u64), KvError> {
-    let key = &record.key;
-    let value = &record.value;
+    let key = record.key;
+    let value = record.value;
     let record_type = &[record.record_type as u8];
+    let timestamp = system_time_to_bytes(&record.timestamp);
     let key_len = key.len() as u32;
     let value_len = value.len() as u32;
 
@@ -24,9 +27,10 @@ fn append(record: Record, file_path: &str) -> Result<(usize, u64), KvError> {
     let key_len_bytes = key_len.to_le_bytes();
     let value_len_bytes = value_len.to_le_bytes();
 
-    // buffer contents: record_type 1byte | key_size 4bytes | value_size 4bytes | key n-bytes | value n-bytes
+    // buffer contents: record_type 1byte | timestamp 8bytes | key_size 4bytes | value_size 4bytes | key n-bytes | value n-bytes
     let bufs = [
         IoSlice::new(record_type),
+        IoSlice::new(&timestamp),
         IoSlice::new(&key_len_bytes),
         IoSlice::new(&value_len_bytes), // 0 for Delete
         IoSlice::new(key),
@@ -54,15 +58,17 @@ fn read((size, offset): (&usize, &u64), file_path: &str) -> Result<Option<Vec<u8
         return Ok(None);
     }
 
+    // timestamp record[1..9]
+
     let key_size =
-        u32::from_le_bytes(record[1..5].try_into().expect("Key size should be 4bytes")) as usize;
+        u32::from_le_bytes(record[9..13].try_into().expect("Key size should be 4bytes")) as usize;
     let value_size = u32::from_le_bytes(
-        record[5..9]
+        record[13..17]
             .try_into()
             .expect("Value size should be 4bytes"),
     ) as usize;
 
-    let key_start = 9;
+    let key_start = 17;
     let value_start = key_start + key_size;
     let value_end = value_start + value_size;
 
@@ -99,8 +105,10 @@ impl KvStore {
         let file_id = "seg-1";
 
         let path = format!("{}/{}", &self.dir_path.display(), file_id);
+
         let record = Record {
             record_type: RecordType::Put,
+            timestamp: SystemTime::now(),
             key,
             value,
         };
@@ -133,6 +141,7 @@ impl KvStore {
 
         let record = Record {
             record_type: RecordType::Delete,
+            timestamp: SystemTime::now(),
             key,
             value: &[0u8; 0],
         };
