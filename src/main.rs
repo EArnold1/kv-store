@@ -1,10 +1,4 @@
-mod error;
-mod helper;
-mod record;
-mod store;
-
-use error::KvError;
-use store::KvStore;
+use kv_store::{error::KvError, store::KvStore};
 
 fn main() -> Result<(), KvError> {
     let mut db = KvStore::open("tmp")?;
@@ -14,9 +8,9 @@ fn main() -> Result<(), KvError> {
     db.put(b"name", b"Emmanuel")?;
     db.put(b"age", b"21")?;
 
-    let value = db.get(b"age")?;
-
-    println!("age: {:?}", value);
+    if let Some(v) = db.get(b"age")? {
+        println!("age: {:?}", String::from_utf8_lossy(&v));
+    }
 
     let value = db.get(b"name")?;
 
