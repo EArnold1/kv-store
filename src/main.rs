@@ -12,15 +12,15 @@ fn main() -> Result<(), KvError> {
         println!("age: {:?}", String::from_utf8_lossy(&v));
     }
 
-    let value = db.get(b"name")?;
+    // let value = db.get(b"name")?;
 
-    println!("name: {:?}", value);
+    // println!("name: {:?}", value);
 
-    db.delete(b"name")?;
+    // db.delete(b"name")?;
 
-    let value = db.get(b"name")?;
+    // let value = db.get(b"name")?;
 
-    println!("name: {:?}", value);
+    // println!("name: {:?}", value);
 
     Ok(())
 }

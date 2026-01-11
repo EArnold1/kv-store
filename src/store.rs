@@ -10,11 +10,12 @@ use crate::{
     error::KvError,
     helper::system_time_to_bytes,
     record::{Record, RecordType},
+    wal::should_rotate,
 };
 
 const TYPE_SIZE: usize = 1; // 1 byte for RecordType
 const LEN_SIZE: usize = 4; // 4 bytes for u32 lengths
-const TIMESTAMP_SIZE: usize = 8; // 8 bytes timestamp 
+const TIMESTAMP_SIZE: usize = 8; // 8 bytes timestamp
 const HEADER_SIZE: usize = TYPE_SIZE + TIMESTAMP_SIZE + LEN_SIZE + LEN_SIZE;
 
 fn append(record: Record, file_path: impl Into<PathBuf>) -> Result<(usize, u64), KvError> {
@@ -94,8 +95,10 @@ fn read(offset: u64, file_path: impl Into<PathBuf>) -> Result<Option<Vec<u8>>, K
 
 #[derive(Debug)]
 pub struct KvStore {
-    memory_store: HashMap<Vec<u8>, (String, u64, usize)>, //file_id, offset, size
+    memory_store: HashMap<Vec<u8>, (PathBuf, u64, usize)>, //file_id, offset, size
     dir_path: PathBuf,
+    compaction_size: usize,
+    current_file_id: u64,
 }
 
 impl KvStore {
@@ -109,19 +112,23 @@ impl KvStore {
         let mut store = KvStore {
             memory_store: HashMap::new(),
             dir_path,
+            compaction_size: 0,
+            current_file_id: 0,
         };
 
-        // re-construct the in-memory index from log files
+        // re-constructs the in-memory index from log files
         store.recovery()?;
 
         Ok(store)
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KvError> {
-        // auto generate file_id
-        let file_id = "seg-1";
+        let mut active_path = self.dir_path.join(format!("{}.log", self.current_file_id));
 
-        let path = format!("{}/{}", &self.dir_path.display(), file_id);
+        if should_rotate(&active_path) {
+            self.current_file_id += 1;
+            active_path = self.dir_path.join(format!("{}.log", self.current_file_id));
+        }
 
         let record = Record {
             record_type: RecordType::Put,
@@ -130,24 +137,24 @@ impl KvStore {
             value,
         };
 
-        let (size, offset) = append(record, &path)?;
+        let (size, offset) = append(record, &active_path)?;
 
         self.memory_store
-            .insert(key.to_vec(), (file_id.to_owned(), offset, size));
+            .insert(key.to_vec(), (active_path, offset, size));
+
+        self.compaction_size += size;
 
         Ok(())
     }
 
     // return type should be refactored
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvError> {
-        let (file_id, offset, ..) = match self.memory_store.get(key) {
+        let (file, offset, ..) = match self.memory_store.get(key) {
             Some(v) => v,
             None => return Ok(None),
         };
 
-        let path = format!("{}/{}", &self.dir_path.display(), file_id);
-
-        read(*offset, path)
+        read(*offset, file)
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), KvError> {
@@ -155,7 +162,12 @@ impl KvStore {
             return Ok(()); // Since nothing is affected, returning this a unit type is fine
         }
 
-        let file_id = "seg-1";
+        let mut active_path = self.dir_path.join(format!("{}.log", self.current_file_id));
+
+        if should_rotate(&active_path) {
+            self.current_file_id += 1;
+            active_path = self.dir_path.join(format!("{}.log", self.current_file_id));
+        }
 
         let record = Record {
             record_type: RecordType::Delete,
@@ -164,9 +176,11 @@ impl KvStore {
             value: &[0u8; 0],
         };
 
-        append(record, self.dir_path.join(file_id))?;
+        let (size, ..) = append(record, &active_path)?;
 
         self.memory_store.remove(key);
+
+        self.compaction_size += size;
 
         Ok(())
     }
@@ -179,7 +193,7 @@ impl KvStore {
         for log in fs::read_dir(&self.dir_path)? {
             let log_path = log?.path();
 
-            let mut file = File::open(log_path)?;
+            let mut file = File::open(&log_path)?;
             let mut offset = 0u64;
             let file_len = file.metadata()?.len();
 
@@ -209,9 +223,11 @@ impl KvStore {
                 let total_size = HEADER_SIZE + key_len + value_len;
 
                 if header[0] == RecordType::Put as u8 {
+                    // TODO: Clone here is expensive
                     self.memory_store
-                        .insert(key, ("seg-1".into(), offset, total_size));
+                        .insert(key, (log_path.clone(), offset, total_size));
                 } else {
+                    self.compaction_size += total_size;
                     self.memory_store.remove(&key);
                 }
 
