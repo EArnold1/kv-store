@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     io::{IoSlice, Read, Seek, SeekFrom, Write},
     path::PathBuf,
-    time::SystemTime,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -12,6 +12,8 @@ use crate::{
     record::{Record, RecordType},
     wal::should_rotate,
 };
+
+const MAX_COMPACTION_SIZE: u64 = 1024 * 2; // 2KB
 
 const TYPE_SIZE: usize = 1; // 1 byte for RecordType
 const LEN_SIZE: usize = 4; // 4 bytes for u32 lengths
@@ -55,7 +57,7 @@ fn append(record: Record, file_path: impl Into<PathBuf>) -> Result<(usize, u64),
 }
 
 // TODO: update the return type
-fn read(offset: u64, file_path: impl Into<PathBuf>) -> Result<Option<Vec<u8>>, KvError> {
+fn read(offset: u64, file_path: impl Into<PathBuf>) -> Result<Option<(Vec<u8>, i64)>, KvError> {
     let mut file = File::open(file_path.into())?;
 
     file.seek(SeekFrom::Start(offset))?;
@@ -68,7 +70,11 @@ fn read(offset: u64, file_path: impl Into<PathBuf>) -> Result<Option<Vec<u8>>, K
         return Ok(None);
     }
 
-    // timestamp record[TYPE_SIZE..TYPE_SIZE + TIMESTAMP_SIZE](1..9)
+    let timestamp = i64::from_le_bytes(
+        header[TYPE_SIZE..TYPE_SIZE + TIMESTAMP_SIZE]
+            .try_into()
+            .expect("timestamp size should be 4bytes"),
+    );
 
     let key_len = u32::from_le_bytes(
         header[TYPE_SIZE + TIMESTAMP_SIZE..TYPE_SIZE + TIMESTAMP_SIZE + LEN_SIZE]
@@ -90,7 +96,7 @@ fn read(offset: u64, file_path: impl Into<PathBuf>) -> Result<Option<Vec<u8>>, K
 
     file.read_exact(&mut value)?;
 
-    Ok(Some(value.to_vec()))
+    Ok(Some((value.to_vec(), timestamp)))
 }
 
 #[derive(Debug)]
@@ -119,12 +125,25 @@ impl KvStore {
         // re-constructs the in-memory index from log files
         store.recovery()?;
 
+        // task to run compaction
+        store.task()?;
         Ok(store)
+    }
+
+    fn task(&mut self) -> Result<(), KvError> {
+        // spawn a task that checks the compaction size after a duration
+        if self.compaction_size > MAX_COMPACTION_SIZE as usize {
+            self.compaction()?;
+        }
+
+        Ok(())
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KvError> {
         let mut active_path = self.dir_path.join(format!("{}.log", self.current_file_id));
 
+        // should rotate and check file_size (recursively check)
+        // Because on start-up the active file might be 1 but 2.log exists and is already full, but after rotating 1.log you get 2.log which is already full
         if should_rotate(&active_path) {
             self.current_file_id += 1;
             active_path = self.dir_path.join(format!("{}.log", self.current_file_id));
@@ -147,19 +166,22 @@ impl KvStore {
         Ok(())
     }
 
-    // return type should be refactored
+    // TODO: return type should be refactored
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvError> {
         let (file, offset, ..) = match self.memory_store.get(key) {
             Some(v) => v,
             None => return Ok(None),
         };
 
-        read(*offset, file)
+        match read(*offset, file)? {
+            Some((value, ..)) => Ok(Some(value)),
+            None => Ok(None),
+        }
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), KvError> {
         if !self.memory_store.contains_key(key) {
-            return Ok(()); // Since nothing is affected, returning this a unit type is fine
+            return Ok(()); // Since nothing is affected, returning a unit type is fine
         }
 
         let mut active_path = self.dir_path.join(format!("{}.log", self.current_file_id));
@@ -196,6 +218,9 @@ impl KvStore {
             let mut file = File::open(&log_path)?;
             let mut offset = 0u64;
             let file_len = file.metadata()?.len();
+            if should_rotate(&log_path) {
+                self.current_file_id += 1;
+            }
 
             while offset < file_len {
                 // read Header
@@ -235,6 +260,65 @@ impl KvStore {
                 file.seek(SeekFrom::Start(offset))?;
             }
         }
+
+        Ok(())
+    }
+
+    fn compaction(&mut self) -> Result<(), KvError> {
+        let compact_path = self.dir_path.join("compacted.log");
+        let new_file = File::create(&compact_path)?;
+        let active_path = self.dir_path.join(format!("{}.log", self.current_file_id));
+
+        for (key, (file, old_offset, ..)) in self.memory_store.iter_mut() {
+            if *file == active_path {
+                continue;
+            }
+
+            let (value, timestamp) = match read(*old_offset, &file)? {
+                Some(val) => val,
+                None => continue,
+            };
+
+            let converted_time = Duration::from_secs(timestamp as u64);
+
+            let record = Record {
+                record_type: RecordType::Put,
+                timestamp: UNIX_EPOCH + converted_time,
+                key,
+                value: &value,
+            };
+
+            // TODO: clone is expensive
+            let (_, offset) = append(record, compact_path.clone())?;
+
+            // Check if current compact file size is more than the MAX_LOG_SIZE //
+
+            // ACTIVE_LOG file will never be `0` because for this function to run the size of un-compacted data should be above the threshold
+            *file = self.dir_path.join(format!("{}.log", 0)); // set new file to the 0th index log
+            *old_offset = offset; // new_offset
+        }
+
+        new_file.sync_all()?;
+
+        // Delete all old .log files except the active one
+        for file in fs::read_dir(&self.dir_path)? {
+            let path = file?.path();
+
+            if path == active_path || path == compact_path {
+                continue;
+            }
+
+            fs::remove_file(path).expect("Should delete file");
+        }
+
+        // Have a structured way of storing compacted data so it can renamed accordingly: compacted.0.log -> 0.log
+        // When the max size cap is reached for a log file, it should be rotated
+
+        // Rename compacted.log to 0.log
+        fs::rename(compact_path, self.dir_path.join(format!("{}.log", 0)))
+            .expect("Should rename successfully");
+
+        self.compaction_size = 0;
 
         Ok(())
     }
