@@ -1,4 +1,4 @@
-use kv_store::{error::KvError, store::KvStore};
+use kv_db::{error::KvError, store::KvStore};
 
 fn main() -> Result<(), KvError> {
     let mut db = KvStore::open("tmp")?;

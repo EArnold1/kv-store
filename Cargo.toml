@@ -1,5 +1,10 @@
 [package]
-name = "kv_store"
+authors = [
+"Arnold Emmanuel <arnoldemmanuel15@gmail.com>" # https://github.com/EArnold1
+]
+license = "MIT"
+description = "kv_db is a RoseDB-inspired log-structured key-value store, focusing on durability and high-throughput writes via WAL."
+name = "kv_db"
 version = "0.1.0"
 edition = "2024"
 

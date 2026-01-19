@@ -5,7 +5,7 @@ const MAX_LOG_SIZE: u64 = 1024; // 1KB
 
 /// a function to check when to rotate the file_id
 pub fn should_rotate(active_path: &PathBuf) -> bool {
-    let current_size = std::fs::metadata(active_path).map(|m| m.len()).unwrap_or(0);
+    let current_size = std::fs::metadata(active_path).map_or(0, |m| m.len());
 
     current_size > MAX_LOG_SIZE
 }
