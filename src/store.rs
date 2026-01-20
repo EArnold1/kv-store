@@ -3,6 +3,7 @@ use std::{
     fs::{self, File},
     io::{IoSlice, Read, Seek, SeekFrom, Write},
     path::PathBuf,
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -164,9 +165,15 @@ impl KvStore {
     /// Runs compaction if the uncompacted data exceeds the threshold.
     fn task(&mut self) -> Result<(), KvError> {
         // spawn a task that checks the compaction size after a duration
-        if self.compaction_size > MAX_COMPACTION_SIZE as usize {
-            self.compaction()?;
-        }
+
+        // thread::spawn(|| {
+        //     loop {
+        //         thread::sleep(Duration::from_secs(10));
+        //         if self.compaction_size > MAX_COMPACTION_SIZE as usize {
+        //             self.compaction().unwrap();
+        //         }
+        //     }
+        // });
 
         Ok(())
     }
