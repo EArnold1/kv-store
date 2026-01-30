@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
-const MAX_LOG_SIZE: u64 = 1024; // 1KB
-// const MAX_LOG_SIZE: usize = 50 * 1024 * 1024; // 10MB
+const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024; // 1GB
 
 /// a function to check when to rotate the file_id
 pub fn should_rotate(active_path: &PathBuf) -> bool {

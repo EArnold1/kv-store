@@ -1,7 +1,7 @@
-use kv_db::{error::KvError, store::KvStore};
+use kv_db::{db::KvDB, error::KvError, store::DbTraits};
 
 fn main() -> Result<(), KvError> {
-    let mut db = KvStore::open("tmp")?;
+    let mut db = KvDB::open("tmp")?;
 
     db.put(
         b"message",
