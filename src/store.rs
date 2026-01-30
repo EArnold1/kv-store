@@ -4,10 +4,9 @@ use std::{
     io::{IoSlice, Read, Seek, SeekFrom, Write},
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc,
         mpsc::{self, Receiver, Sender},
     },
-    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -149,29 +148,6 @@ pub struct KvStore {
 }
 
 impl KvStore {
-    /// Checks if compaction should be triggered based on the current compaction size.
-    ///
-    /// Runs compaction if the uncompacted data exceeds the threshold.
-    pub fn compaction_task(store: Arc<Mutex<KvStore>>) {
-        loop {
-            thread::sleep(Duration::from_secs(10));
-            let mut store = store.lock().expect("Store lock should not be poisoned");
-
-            if !store.running {
-                break;
-            }
-
-            if store.compaction_size < MAX_COMPACTION_SIZE as usize {
-                continue;
-            }
-
-            if let Err(err) = store.compaction() {
-                eprintln!("[ERROR]: compaction failed due to {err:?}");
-                break;
-            }
-        }
-    }
-
     pub fn check_compaction(&self) -> bool {
         self.compaction_size > MAX_COMPACTION_SIZE as usize
     }
@@ -240,7 +216,7 @@ impl KvStore {
     /// Compacts log files by rewriting only the latest key-value pairs to a new log file.
     ///
     /// Removes obsolete log files and resets the compaction size.
-    fn compaction(&mut self) -> Result<(), KvError> {
+    fn _compaction(&mut self) -> Result<(), KvError> {
         if self.rx.recv().is_ok() {
             println!("[Info]: Starting compaction");
             let compact_path = self.dir_path.join("compacted.log");
@@ -316,7 +292,7 @@ impl DbTraits for KvStore {
         let dir_path = path.into();
 
         if !dir_path.exists() {
-            std::fs::create_dir(&dir_path)?;
+            std::fs::create_dir_all(&dir_path)?;
         }
 
         let (tx, rx) = mpsc::channel::<()>();
@@ -402,7 +378,7 @@ impl DbTraits for KvStore {
             record_type: RecordType::Delete,
             timestamp: SystemTime::now(),
             key,
-            value: &[0u8; 0], // &[]
+            value: &[], // &[]
         };
 
         let (size, ..) = append(record, &active_path)?;
