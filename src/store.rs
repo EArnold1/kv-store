@@ -3,7 +3,10 @@ use std::{
     fs::{self, File},
     io::{IoSlice, Read, Seek, SeekFrom, Write},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -15,8 +18,8 @@ use crate::{
     wal::should_rotate,
 };
 
-/// The maximum size (in bytes) of uncompacted data before triggering compaction (2KB).
-const MAX_COMPACTION_SIZE: u64 = 1024 * 2; // 2KB
+/// The maximum size (in bytes) of uncompacted data before triggering compaction (500MB).
+const MAX_COMPACTION_SIZE: u64 = 1024 * 1024 * 10; // 500MB
 
 /// Number of bytes used to store the record type.
 const TYPE_SIZE: usize = 1; // 1 byte for RecordType
@@ -140,6 +143,8 @@ pub struct KvStore {
     dir_path: PathBuf,
     compaction_size: usize,
     current_file_id: u64,
+    pub sender: Arc<Sender<()>>,
+    rx: Receiver<()>,
     pub running: bool,
 }
 
@@ -165,6 +170,10 @@ impl KvStore {
                 break;
             }
         }
+    }
+
+    pub fn check_compaction(&self) -> bool {
+        self.compaction_size > MAX_COMPACTION_SIZE as usize
     }
 
     /// Reconstructs the in-memory index by scanning all log files in the directory.
@@ -232,60 +241,63 @@ impl KvStore {
     ///
     /// Removes obsolete log files and resets the compaction size.
     fn compaction(&mut self) -> Result<(), KvError> {
-        let compact_path = self.dir_path.join("compacted.log");
-        let new_file = File::create(&compact_path)?;
-        let active_path = self.dir_path.join(format!("{}.log", self.current_file_id));
+        if self.rx.recv().is_ok() {
+            println!("[Info]: Starting compaction");
+            let compact_path = self.dir_path.join("compacted.log");
+            let new_file = File::create(&compact_path)?;
+            let active_path = self.dir_path.join(format!("{}.log", self.current_file_id));
 
-        for (key, (file, old_offset, ..)) in self.memory_store.iter_mut() {
-            if *file == active_path {
-                continue;
+            for (key, (file, old_offset, ..)) in self.memory_store.iter_mut() {
+                if *file == active_path {
+                    continue;
+                }
+
+                let (value, timestamp) = match read(*old_offset, &file)? {
+                    Some(val) => val,
+                    None => continue,
+                };
+
+                let converted_time = Duration::from_secs(timestamp as u64);
+
+                let record = Record {
+                    record_type: RecordType::Put,
+                    timestamp: UNIX_EPOCH + converted_time,
+                    key,
+                    value: &value,
+                };
+
+                // TODO: clone is expensive
+                let (_, offset) = append(record, compact_path.clone())?;
+
+                // Check if current compact file size is more than the MAX_LOG_SIZE //
+
+                // ACTIVE_LOG file will never be `0` because for this function to run the size of un-compacted data should be above the threshold
+                *file = self.dir_path.join(format!("{}.log", 0)); // set new file to the 0th index log
+                *old_offset = offset; // new_offset
             }
 
-            let (value, timestamp) = match read(*old_offset, &file)? {
-                Some(val) => val,
-                None => continue,
-            };
+            new_file.sync_all()?;
 
-            let converted_time = Duration::from_secs(timestamp as u64);
+            // Delete all old .log files except the active one
+            for file in fs::read_dir(&self.dir_path)? {
+                let path = file?.path();
 
-            let record = Record {
-                record_type: RecordType::Put,
-                timestamp: UNIX_EPOCH + converted_time,
-                key,
-                value: &value,
-            };
+                if path == active_path || path == compact_path {
+                    continue;
+                }
 
-            // TODO: clone is expensive
-            let (_, offset) = append(record, compact_path.clone())?;
-
-            // Check if current compact file size is more than the MAX_LOG_SIZE //
-
-            // ACTIVE_LOG file will never be `0` because for this function to run the size of un-compacted data should be above the threshold
-            *file = self.dir_path.join(format!("{}.log", 0)); // set new file to the 0th index log
-            *old_offset = offset; // new_offset
-        }
-
-        new_file.sync_all()?;
-
-        // Delete all old .log files except the active one
-        for file in fs::read_dir(&self.dir_path)? {
-            let path = file?.path();
-
-            if path == active_path || path == compact_path {
-                continue;
+                fs::remove_file(path).expect("Should delete file");
             }
 
-            fs::remove_file(path).expect("Should delete file");
+            // Have a structured way of storing compacted data so it can renamed accordingly: compacted.0.log -> 0.log
+            // When the max size cap is reached for a log file, it should be rotated
+
+            // Rename compacted.log to 0.log
+            fs::rename(compact_path, self.dir_path.join(format!("{}.log", 0)))
+                .expect("Should rename successfully");
+
+            self.compaction_size = 0;
         }
-
-        // Have a structured way of storing compacted data so it can renamed accordingly: compacted.0.log -> 0.log
-        // When the max size cap is reached for a log file, it should be rotated
-
-        // Rename compacted.log to 0.log
-        fs::rename(compact_path, self.dir_path.join(format!("{}.log", 0)))
-            .expect("Should rename successfully");
-
-        self.compaction_size = 0;
 
         Ok(())
     }
@@ -307,11 +319,15 @@ impl DbTraits for KvStore {
             std::fs::create_dir(&dir_path)?;
         }
 
+        let (tx, rx) = mpsc::channel::<()>();
+
         let mut store = KvStore {
             memory_store: HashMap::new(),
             dir_path,
             compaction_size: 0,
             current_file_id: 0,
+            sender: Arc::new(tx),
+            rx,
             running: true,
         };
 

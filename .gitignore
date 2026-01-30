@@ -1,2 +1,6 @@
 /target
 tmp/*
+/*/target
+/*/tmp/*
+.DS_store
+/*/.DS_store

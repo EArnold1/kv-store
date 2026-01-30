@@ -29,20 +29,28 @@ impl Drop for KvDB {
 impl DbTraits for KvDB {
     fn open(path: impl Into<std::path::PathBuf>) -> Result<Self, KvError> {
         let store = Arc::new(Mutex::new(KvStore::open(path)?));
-        let store_clone = Arc::clone(&store);
-        let thread_handle = thread::spawn(|| KvStore::compaction_task(store_clone));
 
         Ok(Self {
             store,
-            compaction_thread: Some(thread_handle),
+            compaction_thread: None,
         })
     }
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KvError> {
-        self.store
+        let mut store = self
+            .store
             .lock()
-            .expect("Store lock should not be poisoned")
-            .put(key, value)
+            .expect("Store lock should not be poisoned");
+
+        if store.check_compaction() {
+            let tx = store.sender.clone();
+            thread::spawn(move || {
+                tx.send(()).expect("Receiver should not be dropped")
+                // KvStore::check_compaction(store_clone);
+            });
+        }
+
+        store.put(key, value)
     }
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvError> {
